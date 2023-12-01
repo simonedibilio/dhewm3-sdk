@@ -250,6 +250,7 @@ void idGameLocal::Clear( void ) {
 	framenum = 0;
 	previousTime = 0;
 	time = 0;
+	preciseTime = 0.0f;
 	vacuumAreaNum = 0;
 	mapFileName.Clear();
 	mapFile = NULL;
@@ -311,6 +312,10 @@ void idGameLocal::Init( void ) {
 	const idDict *dict;
 	idAAS *aas;
 
+	msec = 16.0; //60fps
+	gameMsec = msec;
+	gameFps = 60; //60fps
+
 #ifndef GAME_DLL
 
 	TestGameAPI();
@@ -327,6 +332,12 @@ void idGameLocal::Init( void ) {
 	idSIMD::InitProcessor( "game", com_forceGenericSIMD.GetBool() );
 
 #endif
+
+	//Update MSEC and gameFps
+	gameFps = cvarSystem->GetCVarInteger("com_gameHz");
+	msec = 1000.0f / cvarSystem->GetCVarFloat("com_gameHz");
+	msec *= 0.96f; //HACK to emulate OG D3 msec error, in order to have exactly the same game logic speed
+	gameMsec = msec;
 
 	Printf( "----- Initializing Game -----\n" );
 	Printf( "gamename: %s\n", GAME_VERSION );
@@ -605,12 +616,14 @@ void idGameLocal::SaveGame( idFile *f ) {
 	savegame.WriteBool( isMultiplayer );
 	savegame.WriteInt( gameType );
 
+	savegame.WriteFloat(preciseTime);
+
 	savegame.WriteInt( framenum );
 	savegame.WriteInt( previousTime );
 	savegame.WriteInt( time );
 
 #ifdef _D3XP
-	savegame.WriteInt( msec );
+	savegame.WriteFloat( msec );
 #endif
 
 	savegame.WriteInt( vacuumAreaNum );
@@ -1011,6 +1024,7 @@ void idGameLocal::LoadMap( const char *mapName, int randseed ) {
 
 	previousTime	= 0;
 	time			= 0;
+	preciseTime		= 0.0f;
 	framenum		= 0;
 	sessionCommand = "";
 	nextGibTime		= 0;
@@ -1514,12 +1528,14 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 	savegame.ReadBool( isMultiplayer );
 	savegame.ReadInt( (int &)gameType );
 
+	savegame.ReadFloat(preciseTime);
+
 	savegame.ReadInt( framenum );
 	savegame.ReadInt( previousTime );
 	savegame.ReadInt( time );
 
 #ifdef _D3XP
-	savegame.ReadInt( msec );
+	savegame.ReadFloat( msec );
 #endif
 
 	savegame.ReadInt( vacuumAreaNum );
@@ -1561,7 +1577,7 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 		}
 	}
 	if ( gameSoundWorld ) {
-		gameSoundWorld->SetSlowmoSpeed( slowmoMsec / (float)USERCMD_MSEC );
+		gameSoundWorld->SetSlowmoSpeed( slowmoMsec / (float)gameMsec );
 	}
 #endif
 
@@ -2472,7 +2488,8 @@ gameReturn_t idGameLocal::RunFrame( const usercmd_t *clientCmds ) {
 		// update the game time
 		framenum++;
 		previousTime = time;
-		time += msec;
+		preciseTime += msec;
+		time = (int)idMath::Rint(preciseTime);
 		realClientTime = time;
 
 #ifdef _D3XP
@@ -3853,7 +3870,7 @@ idGameLocal::AlertAI
 void idGameLocal::AlertAI( idEntity *ent ) {
 	if ( ent && ent->IsType( idActor::Type ) ) {
 		// alert them for the next frame
-		lastAIAlertTime = time + msec;
+		lastAIAlertTime = time + (int)idMath::Rint(msec);
 		lastAIAlertEntity = static_cast<idActor *>( ent );
 	}
 }
@@ -4266,7 +4283,7 @@ void idGameLocal::SetCamera( idCamera *cam ) {
 
 	} else {
 		inCinematic = false;
-		cinematicStopTime = time + msec;
+		cinematicStopTime = time + idMath::Rint(msec);
 
 		// restore r_znear
 		cvarSystem->SetCVarFloat( "r_znear", 3.0f );
@@ -4862,7 +4879,7 @@ void idGameLocal::ComputeSlowMsec() {
 
 		// stop the state
 		slowmoState = SLOWMO_STATE_OFF;
-		slowmoMsec = USERCMD_MSEC;
+		slowmoMsec = gameMsec;
 	}
 
 	// check the player state
@@ -4883,7 +4900,7 @@ void idGameLocal::ComputeSlowMsec() {
 		slowmoMsec = msec;
 		if ( gameSoundWorld ) {
 			gameSoundWorld->SetSlowmo( true );
-			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / (float)USERCMD_MSEC );
+			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / gameMsec );
 		}
 	}
 	else if ( !powerupOn && slowmoState == SLOWMO_STATE_ON ) {
@@ -4897,10 +4914,10 @@ void idGameLocal::ComputeSlowMsec() {
 
 	// do any necessary ramping
 	if ( slowmoState == SLOWMO_STATE_RAMPUP ) {
-		delta = 4 - slowmoMsec;
+		delta = 4.0 * 60.0 / (float)gameFps - slowmoMsec;
 
 		if ( fabs( delta ) < g_slowmoStepRate.GetFloat() ) {
-			slowmoMsec = 4;
+			slowmoMsec = 4.0 * 60.0 / (float)gameFps;
 			slowmoState = SLOWMO_STATE_ON;
 		}
 		else {
@@ -4908,14 +4925,14 @@ void idGameLocal::ComputeSlowMsec() {
 		}
 
 		if ( gameSoundWorld ) {
-			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / (float)USERCMD_MSEC );
+			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / gameMsec );
 		}
 	}
 	else if ( slowmoState == SLOWMO_STATE_RAMPDOWN ) {
-		delta = 16 - slowmoMsec;
+		delta = 16.0 * 60.0 / gameFps - slowmoMsec;
 
 		if ( fabs( delta ) < g_slowmoStepRate.GetFloat() ) {
-			slowmoMsec = 16;
+			slowmoMsec = 16.0*60.0/(float)gameFps;
 			slowmoState = SLOWMO_STATE_OFF;
 			if ( gameSoundWorld ) {
 				gameSoundWorld->SetSlowmo( false );
@@ -4926,7 +4943,7 @@ void idGameLocal::ComputeSlowMsec() {
 		}
 
 		if ( gameSoundWorld ) {
-			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / (float)USERCMD_MSEC );
+			gameSoundWorld->SetSlowmoSpeed( slowmoMsec / gameMsec );
 		}
 	}
 }
@@ -4937,19 +4954,19 @@ idGameLocal::ResetSlowTimeVars
 ============
 */
 void idGameLocal::ResetSlowTimeVars() {
-	msec				= USERCMD_MSEC;
-	slowmoMsec			= USERCMD_MSEC;
+	msec				= gameMsec;
+	slowmoMsec			= gameMsec;
 	slowmoState			= SLOWMO_STATE_OFF;
 
 	fast.framenum		= 0;
 	fast.previousTime	= 0;
 	fast.time			= 0;
-	fast.msec			= USERCMD_MSEC;
+	fast.msec			= gameMsec;
 
 	slow.framenum		= 0;
 	slow.previousTime	= 0;
 	slow.time			= 0;
-	slow.msec			= USERCMD_MSEC;
+	slow.msec			= gameMsec;
 }
 
 /*
